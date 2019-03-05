@@ -12,7 +12,7 @@ flags = tf.flags
 FLAGS = flags.FLAGS
 
 root = '/home/hhl/code/my_bert/'
-moder_dir = './model_dir/chinese_L-12_H-768_A-12'
+moder_dir = './model_dir/uncased_L-12_H-768_A-12'
 data_dir = './data/NERdata'
 # required parameters
 flags.DEFINE_string('data_dir', data_dir, "The input data dir. Should contain the .tsv files (or other data files) for the task")
@@ -22,13 +22,13 @@ flags.DEFINE_string('bert_config_file',moder_dir + '/bert_config.json', "the con
 flags.DEFINE_string('output_dir', './chinese_ner_model', 'the output dir where the model checkpoints wile be written')
 
 # other parameters
-flags.DEFINE_string('init_checkpoint', moder_dir + '/uncased_L-12_H-768_A-12/bert_model.ckpt', 'Initial checkpoint (usually from a pre-trained BERT model).')
+flags.DEFINE_string('init_checkpoint', moder_dir + '/bert_model.ckpt', 'Initial checkpoint (usually from a pre-trained BERT model).')
 # Typically Uncased model is better unless you know that the cased information is importance for your task such as Name Entity Recognition or Part-Of-Speech tagging
 flags.DEFINE_bool('do_lower_case', True, 'Whether to lower case the input text. Should be True for uncased models and False for cased model')
 flags.DEFINE_integer('max_seq_length', 128, 'The maximum total input sequence length after WordPiece tokenization'
                                             'Sequences longer than this will be truncated, and sequences shorter than this will be padded')
 flags.DEFINE_bool('do_train',True,'do train')
-flags.DEFINE_bool('do_eval', True,'do eval')
+flags.DEFINE_bool('do_eval', False,'do eval')
 flags.DEFINE_bool('do_predict', False,'do predict')
 flags.DEFINE_integer('train_batch_size', 32,'total batch size for training')
 flags.DEFINE_integer('eval_batch_size', 8,'total batch size for eval.')
@@ -64,7 +64,16 @@ class InputExample(object):
     self.guid = guid
     self.text = text
     self.label = label
+    
+class InputFeatures(object):
+    """A single set of features of data."""
 
+    def __init__(self, input_ids, input_mask, segment_ids, label_ids,):
+        self.input_ids = input_ids
+        self.input_mask = input_mask
+        self.segment_ids = segment_ids
+        self.label_ids = label_ids
+        #self.label_mask = label_mask
 
 class DataProcessor(object):
   """Base class for data converters for sequence classification data sets."""
@@ -138,8 +147,7 @@ class NerProcessor(DataProcessor):
         
         return examples
     
-def create_model(bert_config, is_training, input_ids, input_mask,
-                 segment_ids, labels, num_labels, use_one_hot_embeddings):
+def create_model(bert_config, is_training, input_ids, input_mask, segment_ids, labels, num_labels, use_one_hot_embeddings):
     model = modeling.BertModel(
         config=bert_config,
         is_training=is_training,
@@ -179,10 +187,7 @@ def create_model(bert_config, is_training, input_ids, input_mask,
         predict = tf.argmax(probabilities,axis=-1)
         return (loss, per_example_loss, logits,predict)
 
-
-def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
-                     num_train_steps, num_warmup_steps, use_tpu,
-                     use_one_hot_embeddings):
+def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate, num_train_steps, num_warmup_steps, use_tpu, use_one_hot_embeddings):
   """Returns `model_fn` closure for TPUEstimator."""
 
   def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
@@ -271,18 +276,7 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
 
   return model_fn
 
-
-class InputFeatures(object):
-    """A single set of features of data."""
-
-    def __init__(self, input_ids, input_mask, segment_ids, label_ids,):
-        self.input_ids = input_ids
-        self.input_mask = input_mask
-        self.segment_ids = segment_ids
-        self.label_ids = label_ids
-        #self.label_mask = label_mask
-
-def convert_single_example(ex_index, example, label_list, max_seq_length, tokenizer, mode):
+def convert_single_example(ex_index, example, label_list, max_seq_length, tokenizer):
     label_map = {}
     for (i, label) in enumerate(label_list):
         label_map[label] = i
@@ -356,16 +350,56 @@ def convert_single_example(ex_index, example, label_list, max_seq_length, tokeni
         label_ids=label_ids,
         #label_mask = label_mask
     )
-    # write_tokens(ntokens,mode)
     return feature
 
-def filed_based_convert_examples_to_features(examples, label_list, max_seq_length, tokenizer, output_file,mode=None):
+def file_based_input_fn_builder(input_file, seq_length, is_training, drop_remainder):
+    name_to_features = {
+        "input_ids": tf.FixedLenFeature([seq_length], tf.int64),
+        "input_mask": tf.FixedLenFeature([seq_length], tf.int64),
+        "segment_ids": tf.FixedLenFeature([seq_length], tf.int64),
+        "label_ids": tf.FixedLenFeature([seq_length], tf.int64),
+    }
     
+    def _decode_record(record, name_to_features):
+        """Decodes a record to a TensorFlow example."""
+        example = tf.parse_single_example(record, name_to_features)
+        
+        # tf.Example only supports tf.int64, but the TPU only supports tf.int32.
+        # So cast all int64 to int32.
+        for name in list(example.keys()):
+            t = example[name]
+            if t.dtype == tf.int64:
+                t = tf.to_int32(t)
+            example[name] = t
+        
+        return example
+    
+    def input_fn(params):
+        """The actual input function."""
+        batch_size = params["batch_size"]
+        
+        # For training, we want a lot of parallel reading and shuffling.
+        # For eval, we want no shuffling and parallel reading doesn't matter.
+        d = tf.data.TFRecordDataset(input_file)
+        if is_training:
+            d = d.repeat()
+            d = d.shuffle(buffer_size=100)
+        
+        d = d.apply(
+            tf.contrib.data.map_and_batch(
+                lambda record: _decode_record(record, name_to_features),
+                batch_size=batch_size,
+                drop_remainder=drop_remainder))
+        
+        return d
+    return input_fn
+
+def filed_based_convert_examples_to_features(examples, label_list, max_seq_length, tokenizer, output_file):
     writer = tf.python_io.TFRecordWriter(output_file)
     for (ex_index, example) in enumerate(examples):
         if ex_index % 5000 == 0:
             tf.logging.info("Writing example %d of %d" % (ex_index, len(examples)))
-        feature = convert_single_example(ex_index, example, label_list, max_seq_length, tokenizer,mode)
+        feature = convert_single_example(ex_index, example, label_list, max_seq_length, tokenizer)
 
         def create_int_feature(values):
             f = tf.train.Feature(int64_list=tf.train.Int64List(value=list(values)))
@@ -380,13 +414,16 @@ def filed_based_convert_examples_to_features(examples, label_list, max_seq_lengt
         tf_example = tf.train.Example(features=tf.train.Features(feature=features))
         writer.write(tf_example.SerializeToString())
     writer.close()
-    
+
+
+
 def main(_):
     tf.logging.set_verbosity(tf.logging.INFO)
     # 1、读入并处理数据的processor
     processors = {
         'ner':NerProcessor
     }
+    # 检查
     tokenization.validate_case_matches_checkpoint(FLAGS.do_lower_case, FLAGS.init_checkpoint)
     if not FLAGS.do_train and not FLAGS.do_eval:
         raise ValueError("At least one of `do_train` or `do_eval` must be True.")
@@ -399,6 +436,8 @@ def main(_):
     task_name = FLAGS.task_name.lower()
     if task_name not in processors:
         raise ValueError("Task not found: %s" % (task_name))
+    
+    # 设置step参数
     processor = processors[task_name]()
     train_examples = None
     num_train_steps = None
@@ -410,7 +449,6 @@ def main(_):
         
     label_list = processor.get_labels()
     
-    tokenizer = tokenization.FullTokenizer(vocab_file=FLAGS.vocab_file, do_lower_case=FLAGS.do_lower_case)
     tpu_cluster_resolver = None
     if FLAGS.use_tpu and FLAGS.tpu_name:
         tpu_cluster_resolver = tf.contrib.cluster_resolver.TPUClusterResolver(
@@ -425,7 +463,7 @@ def main(_):
             iterations_per_loop=FLAGS.iterations_per_loop,
             num_shards=FLAGS.num_tpu_cores,
             per_host_input_for_training=is_per_host))
-
+    # 2. 写loss 得到bert最后一层的输出，然后根据目前的任务来定制loss
     model_fn = model_fn_builder(
         bert_config=bert_config,
         num_labels=len(label_list) + 1,
@@ -443,7 +481,10 @@ def main(_):
         train_batch_size=FLAGS.train_batch_size,
         eval_batch_size=FLAGS.eval_batch_size,
         predict_batch_size=FLAGS.predict_batch_size)
+    
+    # 3、将InputExample 转变为 InputFeature
     tf.gfile.MakeDirs(FLAGS.output_dir)
+    tokenizer = tokenization.FullTokenizer(vocab_file=FLAGS.vocab_file, do_lower_case=FLAGS.do_lower_case)
     if FLAGS.do_train:
         train_file = os.path.join(FLAGS.output_dir, "train.tf_record")
         filed_based_convert_examples_to_features(
@@ -452,7 +493,38 @@ def main(_):
         tf.logging.info("  Num examples = %d", len(train_examples))
         tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
         tf.logging.info("  Num steps = %d", num_train_steps)
+        train_input_fn = file_based_input_fn_builder(
+            input_file=train_file,
+            seq_length=FLAGS.max_seq_length,
+            is_training=True,
+            drop_remainder=True)
+        estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
+        if FLAGS.do_eval:
+            eval_examples = processor.get_dev_examples(FLAGS.data_dir)
+            eval_file = os.path.join(FLAGS.output_dir, "eval.tf_record")
+            filed_based_convert_examples_to_features(
+                eval_examples, label_list, FLAGS.max_seq_length, tokenizer, eval_file)
     
+            tf.logging.info("***** Running evaluation *****")
+            tf.logging.info("  Num examples = %d", len(eval_examples))
+            tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
+            eval_steps = None
+            if FLAGS.use_tpu:
+                eval_steps = int(len(eval_examples) / FLAGS.eval_batch_size)
+            eval_drop_remainder = True if FLAGS.use_tpu else False
+            eval_input_fn = file_based_input_fn_builder(
+                input_file=eval_file,
+                seq_length=FLAGS.max_seq_length,
+                is_training=False,
+                drop_remainder=eval_drop_remainder)
+            result = estimator.evaluate(input_fn=eval_input_fn, steps=eval_steps)
+            output_eval_file = os.path.join(FLAGS.output_dir, "eval_results.txt")
+            with open(output_eval_file, "w") as writer:
+                tf.logging.info("***** Eval results *****")
+                for key in sorted(result.keys()):
+                    tf.logging.info("  %s = %s", key, str(result[key]))
+                    writer.write("%s = %s\n" % (key, str(result[key])))
+                    
 if __name__ == "__main__":
     flags.mark_flag_as_required("data_dir")
     flags.mark_flag_as_required("task_name")
