@@ -1,8 +1,7 @@
 import tensorflow as tf
-import modeling
-import optimization
-import tokenization
-import csv
+from bert import modeling
+from bert import optimization
+from bert import tokenization
 import os
 import collections
 
@@ -28,7 +27,6 @@ class InputExample(object):
     self.label = label
 
 
-
 class PaddingInputExample(object):
   """Fake example so the num input examples is a multiple of the batch size.
 
@@ -40,7 +38,6 @@ class PaddingInputExample(object):
   We use this class instead of `None` because treating `None` as padding
   battches could cause silent errors.
   """
-
 
 class InputFeatures(object):
   """A single set of features of data."""
@@ -56,8 +53,6 @@ class InputFeatures(object):
     self.segment_ids = segment_ids
     self.label_id = label_id
     self.is_real_example = is_real_example
-
-
 
 class DataProcessor(object):
   """Base class for data converters for sequence classification data sets."""
@@ -95,7 +90,6 @@ class DataProcessor(object):
   #     for line in reader:
   #       lines.append(line)
   #     return lines
-
 
 class XnliProcessor(DataProcessor):
   """Processor for the XNLI data set."""
@@ -464,6 +458,7 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
     _truncate_seq_pair(tokens_a, tokens_b, max_seq_length - 3)
   else:
     # Account for [CLS] and [SEP] with "- 2"
+    # 只取了一部分
     if len(tokens_a) > max_seq_length - 2:
       tokens_a = tokens_a[0:(max_seq_length - 2)]
 
@@ -656,8 +651,8 @@ def main(_):
   }
   if task_name not in processors:
     raise ValueError("Task not found: %s" % (task_name))
-  processor = processors[task_name]()
-
+  # processor = processors[task_name]()
+  processor = NewsProcessor()
   
   tokenizer = tokenization.FullTokenizer(
     vocab_file=FLAGS.vocab_file, do_lower_case=FLAGS.do_lower_case)
@@ -721,7 +716,98 @@ def main(_):
         is_training=True,
         drop_remainder=True)
     estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
-  
+
+  if FLAGS.do_eval:
+      eval_examples = processor.get_dev_examples(FLAGS.data_dir)
+      num_actual_eval_examples = len(eval_examples)
+      if FLAGS.use_tpu:
+          # TPU requires a fixed batch size for all batches, therefore the number
+          # of examples must be a multiple of the batch size, or else examples
+          # will get dropped. So we pad with fake examples which are ignored
+          # later on. These do NOT count towards the metric (all tf.metrics
+          # support a per-instance weight, and these get a weight of 0.0).
+          while len(eval_examples) % FLAGS.eval_batch_size != 0:
+              eval_examples.append(PaddingInputExample())
+    
+      eval_file = os.path.join(FLAGS.output_dir, "eval.tf_record")
+      file_based_convert_examples_to_features(
+          eval_examples, label_list, FLAGS.max_seq_length, tokenizer, eval_file)
+    
+      tf.logging.info("***** Running evaluation *****")
+      tf.logging.info("  Num examples = %d (%d actual, %d padding)",
+                      len(eval_examples), num_actual_eval_examples,
+                      len(eval_examples) - num_actual_eval_examples)
+      tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
+    
+      # This tells the estimator to run through the entire set.
+      eval_steps = None
+      # However, if running eval on the TPU, you will need to specify the
+      # number of steps.
+      if FLAGS.use_tpu:
+          assert len(eval_examples) % FLAGS.eval_batch_size == 0
+          eval_steps = int(len(eval_examples) // FLAGS.eval_batch_size)
+    
+      eval_drop_remainder = True if FLAGS.use_tpu else False
+      eval_input_fn = file_based_input_fn_builder(
+          input_file=eval_file,
+          seq_length=FLAGS.max_seq_length,
+          is_training=False,
+          drop_remainder=eval_drop_remainder)
+    
+      result = estimator.evaluate(input_fn=eval_input_fn, steps=eval_steps)
+    
+      output_eval_file = os.path.join(FLAGS.output_dir, "eval_results.txt")
+      with tf.gfile.GFile(output_eval_file, "w") as writer:
+          tf.logging.info("***** Eval results *****")
+          for key in sorted(result.keys()):
+              tf.logging.info("  %s = %s", key, str(result[key]))
+              writer.write("%s = %s\n" % (key, str(result[key])))
+
+  if FLAGS.do_predict:
+      predict_examples = processor.get_test_examples(FLAGS.data_dir)
+      num_actual_predict_examples = len(predict_examples)
+      if FLAGS.use_tpu:
+          # TPU requires a fixed batch size for all batches, therefore the number
+          # of examples must be a multiple of the batch size, or else examples
+          # will get dropped. So we pad with fake examples which are ignored
+          # later on.
+          while len(predict_examples) % FLAGS.predict_batch_size != 0:
+              predict_examples.append(PaddingInputExample())
+    
+      predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
+      file_based_convert_examples_to_features(predict_examples, label_list,
+                                              FLAGS.max_seq_length, tokenizer,
+                                              predict_file)
+    
+      tf.logging.info("***** Running prediction*****")
+      tf.logging.info("  Num examples = %d (%d actual, %d padding)",
+                      len(predict_examples), num_actual_predict_examples,
+                      len(predict_examples) - num_actual_predict_examples)
+      tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
+    
+      predict_drop_remainder = True if FLAGS.use_tpu else False
+      predict_input_fn = file_based_input_fn_builder(
+          input_file=predict_file,
+          seq_length=FLAGS.max_seq_length,
+          is_training=False,
+          drop_remainder=predict_drop_remainder)
+    
+      result = estimator.predict(input_fn=predict_input_fn)
+    
+      output_predict_file = os.path.join(FLAGS.output_dir, "test_results.tsv")
+      with tf.gfile.GFile(output_predict_file, "w") as writer:
+          num_written_lines = 0
+          tf.logging.info("***** Predict results *****")
+          for (i, prediction) in enumerate(result):
+              probabilities = prediction["probabilities"]
+              if i >= num_actual_predict_examples:
+                  break
+              output_line = "\t".join(
+                  str(class_probability)
+                  for class_probability in probabilities) + "\n"
+              writer.write(output_line)
+              num_written_lines += 1
+      assert num_written_lines == num_actual_predict_examples
 
 flags = tf.flags
 
@@ -729,13 +815,13 @@ FLAGS = flags.FLAGS
 
 root = '/home/hhl/code/my_bert/'
 moder_dir = './model_dir/chinese_L-12_H-768_A-12'
-data_dir = './chinese_classification_data'
+data_dir = './data/chinese_classification_data'
 # required parameters
-flags.DEFINE_string('data_dir', '/home/hhl/code/my_bert/chinese_classification_data', "The input data dir. Should contain the .tsv files (or other data files) for the task")
+flags.DEFINE_string('data_dir', '/home/hhl/code/my_bert/data/chinese_classification_data', "The input data dir. Should contain the .tsv files (or other data files) for the task")
 flags.DEFINE_string('task_name', 'NEWS', 'the name of task to train')
 flags.DEFINE_string('vocab_file', '/home/hhl/code/my_bert/model_dir/chinese_L-12_H-768_A-12/vocab.txt', 'the vocabulary file that the BERT model was trained on')
 flags.DEFINE_string('bert_config_file','/home/hhl/code/my_bert/model_dir/chinese_L-12_H-768_A-12/bert_config.json', "the config json file corresponding to the pre-trained bert model.")
-flags.DEFINE_string('output_dir', './output', 'the output dir where the model checkpoints wile be written')
+flags.DEFINE_string('output_dir', './chinese_classifier_model', 'the output dir where the model checkpoints wile be written')
 
 # other parameters
 flags.DEFINE_string('init_checkpoint', '/home/hhl/code/my_bert/model_dir/chinese_L-12_H-768_A-12/bert_model.ckpt', 'Initial checkpoint (usually from a pre-trained BERT model).')
@@ -744,7 +830,7 @@ flags.DEFINE_bool('do_lower_case', True, 'Whether to lower case the input text. 
 flags.DEFINE_integer('max_seq_length', 128, 'The maximum total input sequence length after WordPiece tokenization'
                                             'Sequences longer than this will be truncated, and sequences shorter than this will be padded')
 flags.DEFINE_bool('do_train',True,'do train')
-flags.DEFINE_bool('do_eval', False,'do eval')
+flags.DEFINE_bool('do_eval', True,'do eval')
 flags.DEFINE_bool('do_predict', False,'do predict')
 flags.DEFINE_integer('train_batch_size', 32,'total batch size for training')
 flags.DEFINE_integer('eval_batch_size', 8,'total batch size for eval.')
