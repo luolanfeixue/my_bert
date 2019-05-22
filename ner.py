@@ -5,6 +5,7 @@ from bert import optimization
 from bert import tokenization
 import tensorflow as tf
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import pickle
 flags = tf.flags
@@ -28,7 +29,7 @@ flags.DEFINE_bool('do_lower_case', True, 'Whether to lower case the input text. 
 flags.DEFINE_integer('max_seq_length', 128, 'The maximum total input sequence length after WordPiece tokenization'
                                             'Sequences longer than this will be truncated, and sequences shorter than this will be padded')
 flags.DEFINE_bool('do_train',True,'do train')
-flags.DEFINE_bool('do_eval', False,'do eval')
+flags.DEFINE_bool('do_eval', True,'do eval')
 flags.DEFINE_bool('do_predict', False,'do predict')
 flags.DEFINE_integer('train_batch_size', 32,'total batch size for training')
 flags.DEFINE_integer('eval_batch_size', 8,'total batch size for eval.')
